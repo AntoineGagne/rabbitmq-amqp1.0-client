@@ -117,6 +117,8 @@ close(Pid, Reason) ->
 %%% Private API
 %%%===================================================================
 
+-spec start_link(SupPid :: pid(), Config :: connection_config()) ->
+    {ok, pid()} | ignore | {error, term()}.
 start_link(Sup, Config) ->
     gen_statem:start_link(?MODULE, {Sup, Config}, []).
 
@@ -136,6 +138,7 @@ protocol_header_received(Pid, Protocol, Maj, Min, Rev) ->
 begin_session(Pid) ->
     gen_statem:call(Pid, begin_session).
 
+-spec heartbeat(Pid :: pid()) -> ok.
 heartbeat(Pid) ->
     gen_statem:cast(Pid, heartbeat).
 
@@ -285,8 +288,7 @@ handle_event(info, Info, StateName, State) ->
     error_logger:info_msg("Conn handle_info ~p ~p~n", [Info, StateName]),
     {next_state, StateName, State}.
 
-terminate(Reason, _StateName, #state{connection_sup = Sup,
-                                     config = Config}) ->
+terminate(Reason, _StateName, #state{connection_sup = Sup, config = Config}) ->
     ok = notify_closed(Config, Reason),
     case Reason of
         normal -> sys:terminate(Sup, normal);
