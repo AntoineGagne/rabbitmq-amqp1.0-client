@@ -15,23 +15,12 @@
 %%
 -module(amqp10_client_session).
 
--behaviour(gen_fsm).
+-behaviour(gen_statem).
 
 -include("amqp10_client.hrl").
 -include_lib("amqp10_common/include/amqp10_framing.hrl").
 
--ifdef(nowarn_deprecated_gen_fsm).
--compile({nowarn_deprecated_function,
-          [{gen_fsm, reply, 2},
-           {gen_fsm, send_all_state_event, 2},
-           {gen_fsm, send_event, 2},
-           {gen_fsm, start_link, 3},
-           {gen_fsm, sync_send_all_state_event, 2},
-           {gen_fsm, sync_send_event, 2},
-           {gen_fsm, sync_send_event, 3}]}).
--endif.
-
-%% Public API.
+%% Public API
 -export(['begin'/1,
          begin_sync/1,
          begin_sync/2,
@@ -40,29 +29,18 @@
          detach/2,
          transfer/3,
          flow/4,
-         disposition/6
-        ]).
+         disposition/6]).
 
 %% Private API.
 -export([start_link/4,
-         socket_ready/2
-        ]).
+         socket_ready/2]).
 
-%% gen_fsm callbacks.
+%% gen_statem callbacks
 -export([init/1,
-         unmapped/2,
-         unmapped/3,
-         begin_sent/2,
-         begin_sent/3,
-         mapped/2,
-         mapped/3,
-         end_sent/2,
-         end_sent/3,
-         handle_event/3,
-         handle_sync_event/4,
-         handle_info/3,
-         terminate/3,
-         code_change/4]).
+         callback_mode/0,
+         handle_event/4,
+         code_change/4,
+         terminate/3]).
 
 -define(MAX_SESSION_WINDOW_SIZE, 65535).
 -define(DEFAULT_MAX_HANDLE, 16#ffffffff).
@@ -161,10 +139,9 @@
          notify :: pid()
         }).
 
-
-%% -------------------------------------------------------------------
-%% Public API.
-%% -------------------------------------------------------------------
+%%%===================================================================
+%%% Public API
+%%%===================================================================
 
 -spec 'begin'(pid()) -> supervisor:startchild_ret().
 'begin'(Connection) ->
@@ -188,75 +165,74 @@ begin_sync(Connection, Timeout) ->
 
 -spec 'end'(pid()) -> ok.
 'end'(Pid) ->
-    gen_fsm:send_event(Pid, 'end').
+    gen_statem:cast(Pid, 'end').
 
 -spec attach(pid(), attach_args()) -> {ok, link_ref()}.
 attach(Session, Args) ->
-    gen_fsm:sync_send_event(Session, {attach, Args}).
+    gen_statem:call(Session, {attach, Args}).
 
 -spec detach(pid(), link_handle()) -> ok | {error, link_not_found | half_attached}.
 detach(Session, Handle) ->
-    gen_fsm:sync_send_event(Session, {detach, Handle}).
+    gen_statem:call(Session, {detach, Handle}).
 
 -spec transfer(pid(), amqp10_msg:amqp10_msg(), timeout()) ->
     ok | {error, insufficient_credit | link_not_found | half_attached}.
 transfer(Session, Amqp10Msg, Timeout) ->
     [Transfer | Records] = amqp10_msg:to_amqp_records(Amqp10Msg),
-    gen_fsm:sync_send_event(Session, {transfer, Transfer, Records}, Timeout).
+    gen_statem:call(Session, {transfer, Transfer, Records}, Timeout).
 
 flow(Session, Handle, Flow, RenewAfter) ->
-    gen_fsm:send_event(Session, {flow, Handle, Flow, RenewAfter}).
+    gen_statem:cast(Session, {flow, Handle, Flow, RenewAfter}).
 
 -spec disposition(pid(), link_role(), transfer_id(), transfer_id(), boolean(),
                   amqp10_client_types:delivery_state()) -> ok.
 disposition(Session, Role, First, Last, Settled, DeliveryState) ->
-    gen_fsm:sync_send_event(Session, {disposition, Role, First, Last, Settled,
-                                      DeliveryState}).
+    gen_statem:call(Session, {disposition, Role, First, Last, Settled, DeliveryState}).
 
-
-
-%% -------------------------------------------------------------------
-%% Private API.
-%% -------------------------------------------------------------------
+%%%===================================================================
+%%% Private API
+%%%===================================================================
 
 start_link(From, Channel, Reader, ConnConfig) ->
-    gen_fsm:start_link(?MODULE, [From, Channel, Reader, ConnConfig], []).
+    gen_statem:start_link(?MODULE, {From, Channel, Reader, ConnConfig}, []).
 
 -spec socket_ready(pid(), amqp10_client_connection:amqp10_socket()) -> ok.
 socket_ready(Pid, Socket) ->
-    gen_fsm:send_event(Pid, {socket_ready, Socket}).
+    gen_statem:cast(Pid, {socket_ready, Socket}).
 
-%% -------------------------------------------------------------------
-%% gen_fsm callbacks.
-%% -------------------------------------------------------------------
+%%%===================================================================
+%%% gen_statem callbacks
+%%%===================================================================
 
-init([FromPid, Channel, Reader, ConnConfig]) ->
+callback_mode() ->
+    [handle_event_function].
+
+init({FromPid, Channel, Reader, ConnConfig}) ->
     process_flag(trap_exit, true),
     amqp10_client_frame_reader:register_session(Reader, self(), Channel),
     State = #state{notify = FromPid, channel = Channel, reader = Reader,
                    connection_config = ConnConfig},
     {ok, unmapped, State}.
 
-unmapped({socket_ready, Socket}, State) ->
+handle_event(cast, {socket_ready, Socket}, unmapped, State) ->
     State1 = State#state{socket = Socket},
     ok = send_begin(State1),
-    {next_state, begin_sent, State1}.
+    {next_state, begin_sent, State1};
 
-unmapped({attach, Attach}, From,
-                      #state{early_attach_requests = EARs} = State) ->
-    {next_state, unmapped,
-     State#state{early_attach_requests = [{From, Attach} | EARs]}}.
+handle_event({call, From}, {attach, Attach}, unmapped,
+             #state{early_attach_requests = EARs} = State) ->
+    {next_state, unmapped, State#state{early_attach_requests = [{From, Attach} | EARs]}};
 
-begin_sent(#'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
-                         next_outgoing_id = {uint, NOI},
-                         incoming_window = {uint, InWindow},
-                         outgoing_window = {uint, OutWindow}},
-           #state{early_attach_requests = EARs} = State) ->
+handle_event(cast, #'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
+                                 next_outgoing_id = {uint, NOI},
+                                 incoming_window = {uint, InWindow},
+                                 outgoing_window = {uint, OutWindow}}, begin_sent,
+             #state{early_attach_requests = EARs} = State) ->
 
     State1 = State#state{remote_channel = RemoteChannel},
     State2 = lists:foldr(fun({From, Attach}, S) ->
                                  {S2, H} = send_attach(fun send/2, Attach, From, S),
-                                 gen_fsm:reply(From, {ok, H}),
+                                 gen_statem:reply(From, {ok, H}),
                                  S2
                          end, State1, EARs),
 
@@ -265,21 +241,20 @@ begin_sent(#'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
     {next_state, mapped, State2#state{early_attach_requests = [],
                                       next_incoming_id = NOI,
                                       remote_incoming_window = InWindow,
-                                      remote_outgoing_window = OutWindow}}.
+                                      remote_outgoing_window = OutWindow}};
 
-begin_sent({attach, Attach}, From,
-                      #state{early_attach_requests = EARs} = State) ->
-    {next_state, begin_sent,
-     State#state{early_attach_requests = [{From, Attach} | EARs]}}.
+handle_event({call, From}, {attach, Attach}, begin_sent,
+             #state{early_attach_requests = EARs} = State) ->
+    {next_state, begin_sent, State#state{early_attach_requests = [{From, Attach} | EARs]}};
 
-mapped('end', State) ->
+handle_event(cast, 'end', mapped, State) ->
     %% We send the first end frame and wait for the reply.
     send_end(State),
     {next_state, end_sent, State};
-mapped({flow, OutHandle, Flow0, RenewAfter}, State0) ->
+handle_event(cast, {flow, OutHandle, Flow0, RenewAfter}, mapped, State0) ->
     State = send_flow(fun send/2, OutHandle, Flow0, RenewAfter, State0),
-    {next_state, mapped, State};
-mapped(#'v1_0.end'{error = Err}, State) ->
+    {keep_state, State};
+handle_event(cast, #'v1_0.end'{error = Err}, mapped, State) ->
     %% We receive the first end frame, reply and terminate.
     _ = send_end(State),
     % TODO: send notifications for links?
@@ -289,11 +264,11 @@ mapped(#'v1_0.end'{error = Err}, State) ->
              end,
     ok = notify_session_ended(State, Reason),
     {stop, normal, State};
-mapped(#'v1_0.attach'{name = {utf8, Name},
-                      initial_delivery_count = IDC,
-                      handle = {uint, InHandle}},
-        #state{links = Links, link_index = LinkIndex,
-               link_handle_index = LHI} = State0) ->
+handle_event(cast, #'v1_0.attach'{name = {utf8, Name},
+                                  initial_delivery_count = IDC,
+                                  handle = {uint, InHandle}},
+             mapped, #state{links = Links, link_index = LinkIndex,
+                            link_handle_index = LHI} = State0) ->
 
     #{Name := OutHandle} = LinkIndex,
     #{OutHandle := Link0} = Links,
@@ -308,10 +283,10 @@ mapped(#'v1_0.attach'{name = {utf8, Name},
     State = State0#state{links = Links#{OutHandle => Link},
                          link_index = maps:remove(Name, LinkIndex),
                          link_handle_index = LHI#{InHandle => OutHandle}},
-    {next_state, mapped, State};
+    {keep_state, State};
 
-mapped(#'v1_0.detach'{handle = {uint, InHandle}, closed = Closed, error = Err},
-        #state{links = Links, link_handle_index = LHI} = State0)
+handle_event(cast, #'v1_0.detach'{handle = {uint, InHandle}, closed = Closed, error = Err}, mapped,
+             #state{links = Links, link_handle_index = LHI} = State0)
   when Closed =:= true orelse Closed =:= undefined ->
     with_link(InHandle, State0,
               fun (#link{output_handle = OutHandle} = Link, State) ->
@@ -325,10 +300,10 @@ mapped(#'v1_0.detach'{handle = {uint, InHandle}, closed = Closed, error = Err},
                                    link_handle_index = maps:remove(InHandle, LHI)}}
               end);
 
-mapped(#'v1_0.flow'{handle = undefined} = Flow, State0) ->
+handle_event(cast, #'v1_0.flow'{handle = undefined} = Flow, mapped, State0) ->
     State = handle_session_flow(Flow, State0),
-    {next_state, mapped, State};
-mapped(#'v1_0.flow'{handle = {uint, InHandle}} = Flow,
+    {keep_state, State};
+handle_event(cast, #'v1_0.flow'{handle = {uint, InHandle}} = Flow, mapped,
        #state{links = Links} = State0) ->
 
     State = handle_session_flow(Flow, State0),
@@ -341,11 +316,11 @@ mapped(#'v1_0.flow'{handle = {uint, InHandle}} = Flow,
     ok = maybe_notify_link_credit(Link0, Link),
     Links1 = Links#{OutHandle => Link},
     State1 = State#state{links = Links1},
-    {next_state, mapped, State1};
+    {keep_state, State1};
 
-mapped({#'v1_0.transfer'{handle = {uint, InHandle},
-                         more = true} = Transfer, Payload},
-                         #state{links = Links} = State0) ->
+handle_event(cast,{#'v1_0.transfer'{handle = {uint, InHandle},
+                                    more = true} = Transfer, Payload},
+             mapped, #state{links = Links} = State0) ->
 
     {ok, #link{output_handle = OutHandle} = Link} =
         find_link_by_input_handle(InHandle, State0),
@@ -354,16 +329,15 @@ mapped({#'v1_0.transfer'{handle = {uint, InHandle},
 
     State = book_partial_transfer_received(
               State0#state{links = Links#{OutHandle => Link1}}),
-    {next_state, mapped, State};
-mapped({#'v1_0.transfer'{handle = {uint, InHandle},
-                         delivery_id = MaybeDeliveryId,
-                         settled = Settled} = Transfer0, Payload0},
-                         #state{incoming_unsettled = Unsettled0} = State0) ->
+    {keep_state, State};
+handle_event(cast, {#'v1_0.transfer'{handle = {uint, InHandle},
+                                     delivery_id = MaybeDeliveryId,
+                                     settled = Settled} = Transfer0, Payload0},
+              mapped, #state{incoming_unsettled = Unsettled0} = State0) ->
 
     {ok, #link{target = {pid, TargetPid},
                output_handle = OutHandle,
-               ref = LinkRef} = Link0} =
-        find_link_by_input_handle(InHandle, State0),
+               ref = LinkRef} = Link0} = find_link_by_input_handle(InHandle, State0),
 
     {Transfer, Payload, Link} = complete_partial_transfer(Transfer0, Payload0, Link0),
     Msg = decode_as_msg(Transfer, Payload),
@@ -387,46 +361,44 @@ mapped({#'v1_0.transfer'{handle = {uint, InHandle},
             % deliver
             TargetPid ! {amqp10_msg, LinkRef, Msg},
             State1 = auto_flow(Link, State),
-            {next_state, mapped, State1};
+            {keep_state, State1};
         {credit_exhausted, State} ->
             TargetPid ! {amqp10_msg, LinkRef, Msg},
             ok = notify_link(Link, credit_exhausted),
-            {next_state, mapped, State};
+            {keep_state, State};
         {transfer_limit_exceeded, State} ->
             error_logger:info_msg("transfer_limit_exceeded for link ~p~n", [Link]),
-            Link1 = detach_with_error_cond(Link, State,
-                                           ?V_1_0_LINK_ERROR_TRANSFER_LIMIT_EXCEEDED),
-            {next_state, mapped, update_link(Link1, State)}
+            Link1 = detach_with_error_cond(Link, State, ?V_1_0_LINK_ERROR_TRANSFER_LIMIT_EXCEEDED),
+            {keep_state, update_link(Link1, State)}
     end;
 
 
 % role=true indicates the disposition is from a `receiver`. i.e. from the
 % clients point of view these are dispositions relating to `sender`links
-mapped(#'v1_0.disposition'{role = true, settled = true, first = {uint, First},
-                           last = Last0, state = DeliveryState},
-       #state{unsettled = Unsettled0} = State) ->
+handle_event(cast, #'v1_0.disposition'{role = true, settled = true, first = {uint, First},
+                                       last = Last0, state = DeliveryState}, mapped,
+             #state{unsettled = Unsettled0} = State) ->
     Last = case Last0 of
                undefined -> First;
                {uint, L} -> L
            end,
     % TODO: no good if the range becomes very large!! refactor
     Unsettled =
-        lists:foldl(fun(Id, Acc) ->
-                            case Acc of
-                                #{Id := {DeliveryTag, Receiver}} ->
-                                    S = translate_delivery_state(DeliveryState),
-                                    ok = notify_disposition(Receiver,
-                                                            {S, DeliveryTag}),
-                                    maps:remove(Id, Acc);
-                                _ -> Acc
-                            end
-                    end, Unsettled0, lists:seq(First, Last)),
+    lists:foldl(fun(Id, Acc) ->
+                        case Acc of
+                            #{Id := {DeliveryTag, Receiver}} ->
+                                S = translate_delivery_state(DeliveryState),
+                                ok = notify_disposition(Receiver,
+                                                        {S, DeliveryTag}),
+                                maps:remove(Id, Acc);
+                            _ -> Acc
+                        end
+                end, Unsettled0, lists:seq(First, Last)),
 
-    {next_state, mapped, State#state{unsettled = Unsettled}};
-mapped(Frame, State) ->
-    error_logger:warning_msg("Unhandled session frame ~p in state ~p~n",
-                             [Frame, State]),
-    {next_state, mapped, State}.
+    {keep_state, State#state{unsettled = Unsettled}};
+handle_event(cast, Frame, mapped, State) ->
+    error_logger:warning_msg("Unhandled session frame ~p in state ~p~n", [Frame, State]),
+    keep_state_and_data;
 
 %% mapped/3
 %% TODO:: settled = false is probably dependent on the snd_settle_mode
@@ -434,11 +406,11 @@ mapped(Frame, State) ->
 %% unsettled transfer. Who knows really?
 %%
 %% Transfer. See spec section: 2.6.12
-mapped({transfer, #'v1_0.transfer'{handle = {uint, OutHandle},
-                                   delivery_tag = {binary, DeliveryTag},
-                                   settled = false} = Transfer0, Parts},
-       From, #state{next_outgoing_id = NOI, links = Links,
-                    unsettled = Unsettled} = State) ->
+handle_event({call, From}, {transfer, #'v1_0.transfer'{handle = {uint, OutHandle},
+                                                       delivery_tag = {binary, DeliveryTag},
+                                                       settled = false} = Transfer0, Parts},
+             mapped, #state{next_outgoing_id = NOI, links = Links,
+                            unsettled = Unsettled} = State) ->
     case Links of
         #{OutHandle := #link{input_handle = undefined}} ->
             {reply, {error, half_attached}, mapped, State};
@@ -453,27 +425,27 @@ mapped({transfer, #'v1_0.transfer'{handle = {uint, OutHandle},
         _ ->
             {reply, {error, link_not_found}, mapped, State}
     end;
-mapped({transfer, #'v1_0.transfer'{handle = {uint, OutHandle}} = Transfer0,
-        Parts}, _From, #state{next_outgoing_id = NOI,
-                              links = Links} = State) ->
+handle_event({call, From},
+             {transfer, #'v1_0.transfer'{handle = {uint, OutHandle}} = Transfer0, Parts},
+             mapped, #state{next_outgoing_id = NOI,
+                            links = Links} = State) ->
     case Links of
         #{OutHandle := #link{input_handle = undefined}} ->
-            {reply, {error, half_attached}, mapped, State};
+            {keep_state_and_data, [{reply, From, {error, half_attached}}]};
         #{OutHandle := #link{link_credit = LC}} when LC =< 0 ->
-            {reply, {error, insufficient_credit}, mapped, State};
+            {keep_state_and_data, [{reply, From, {error, insufficient_credit}}]};
         #{OutHandle := Link} ->
             Transfer = Transfer0#'v1_0.transfer'{delivery_id = uint(NOI)},
             {ok, NumFrames} = send_transfer(Transfer, Parts, State),
             % TODO look into if erlang will correctly wrap integers during
             % binary conversion.
-            {reply, ok, mapped, book_transfer_send(NumFrames, Link, State)};
+            {keep_state, book_transfer_send(NumFrames, Link, State), [{reply, From, ok}]};
         _ ->
-            {reply, {error, link_not_found}, mapped, State}
+            {keep_state_and_data, [{reply, From, {error, link_not_found}}]}
     end;
 
-mapped({disposition, Role, First, Last, Settled0, DeliveryState}, _From,
-       #state{incoming_unsettled = Unsettled0,
-              links = Links0} = State0) ->
+handle_event({call, From}, {disposition, Role, First, Last, Settled0, DeliveryState}, mapped,
+             #state{incoming_unsettled = Unsettled0, links = Links0} = State0) ->
     Disposition =
     begin
         DS = translate_delivery_state(DeliveryState),
@@ -501,52 +473,44 @@ mapped({disposition, Role, First, Last, Settled0, DeliveryState}, _From,
 
     Res = send(Disposition, State),
 
-    {reply, Res, mapped, State};
+    {keep_state, State, [{reply, From, Res}]};
 
-mapped({attach, Attach}, From, State) ->
+handle_event({call, From}, {attach, Attach}, mapped, State) ->
     {State1, LinkRef} = send_attach(fun send/2, Attach, From, State),
-    {reply, {ok, LinkRef}, mapped, State1};
+    {keep_state, State1, [{reply, From, {ok, LinkRef}}]};
 
-mapped(Msg, From, State) ->
+handle_event({call, From}, Msg, mapped, State) ->
     {Reply, State1} = send_detach(fun send/2, Msg, From, State),
-    {reply, Reply, mapped, State1}.
+    {keep_state, State1, [{reply, From, Reply}]};
 
-end_sent(#'v1_0.end'{}, State) ->
+handle_event(cast, #'v1_0.end'{}, end_sent, State) ->
     {stop, normal, State};
-end_sent(_Frame, State) ->
+handle_event(cast, _Frame, end_sent, _State) ->
     % just drop frames here
-    {next_state, end_sent, State}.
+    keep_state_and_data;
 
-end_sent(_Frame, _From, State) ->
+handle_event({call, _From}, _Frame, end_sent, _State) ->
     % just drop frames here
-    {next_state, end_sent, State}.
+    keep_state_and_data;
 
-handle_event(_Event, StateName, State) ->
-    {next_state, StateName, State}.
+handle_event(cast, _Event, _StateName, _State) ->
+    keep_state_and_data;
 
-handle_sync_event(_Event, _From, StateName, State) ->
-    Reply = ok,
-    {reply, Reply, StateName, State}.
+handle_event({call, From}, _Event, _StateName, _State) ->
+    {keep_state_and_data, [{reply, From, ok}]};
 
-handle_info(_Info, StateName, State) ->
-    {next_state, StateName, State}.
+handle_event(info, _Info, _StateName, _State) ->
+    keep_state_and_data.
 
-terminate(Reason, _StateName, #state{channel = Channel,
-                                     remote_channel = RemoteChannel,
-                                     reader = Reader}) ->
-    case Reason of
-        normal -> amqp10_client_frame_reader:unregister_session(
-                    Reader, self(), Channel, RemoteChannel);
-        _      -> ok
-    end,
+terminate(_Reason, _State, _Data) ->
     ok.
 
-code_change(_OldVsn, StateName, State, _Extra) ->
-    {ok, StateName, State}.
+code_change(_Vsn, State, Data, _Extra) ->
+    {ok, State, Data}.
 
-%% -------------------------------------------------------------------
-%% Internal functions.
-%% -------------------------------------------------------------------
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
 
 send_begin(#state{socket = Socket,
                   next_outgoing_id = NextOutId,
