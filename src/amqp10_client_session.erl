@@ -413,17 +413,16 @@ handle_event({call, From}, {transfer, #'v1_0.transfer'{handle = {uint, OutHandle
                             unsettled = Unsettled} = State) ->
     case Links of
         #{OutHandle := #link{input_handle = undefined}} ->
-            {reply, {error, half_attached}, mapped, State};
+            {keep_state_and_data, [{reply, From, {error, half_attached}}]};
         #{OutHandle := #link{link_credit = LC}} when LC =< 0 ->
-            {reply, {error, insufficient_credit}, mapped, State};
+            {keep_state_and_data, [{reply, From, {error, insufficient_credit}}]};
         #{OutHandle := Link} ->
-            Transfer = Transfer0#'v1_0.transfer'{delivery_id = uint(NOI),
-                                                 resume = false},
+            Transfer = Transfer0#'v1_0.transfer'{delivery_id = uint(NOI), resume = false},
             {ok, NumFrames} = send_transfer(Transfer, Parts, State),
             State1 = State#state{unsettled = Unsettled#{NOI => {DeliveryTag, From}}},
-            {reply, ok, mapped, book_transfer_send(NumFrames, Link, State1)};
+            {keep_state, book_transfer_send(NumFrames, Link, State1), [{reply, From, ok}]};
         _ ->
-            {reply, {error, link_not_found}, mapped, State}
+            {keep_state_and_data, [{reply, From, {error, link_not_found}}]}
     end;
 handle_event({call, From},
              {transfer, #'v1_0.transfer'{handle = {uint, OutHandle}} = Transfer0, Parts},
