@@ -23,6 +23,7 @@
 
 -include_lib("src/amqp10_client.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(UNAUTHORIZED_USER, <<"test_user_no_perm">>).

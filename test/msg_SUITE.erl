@@ -21,6 +21,7 @@
 
 -include_lib("amqp10_common/include/amqp10_framing.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 
