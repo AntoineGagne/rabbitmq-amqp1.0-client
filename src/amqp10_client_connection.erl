@@ -110,7 +110,7 @@ open(Config) ->
 -spec close(pid(), {amqp10_client_types:amqp_error()
                    | amqp10_client_types:connection_error(), binary()} | none) -> ok.
 close(Pid, Reason) ->
-    gen_fsm:send_event(Pid, {close, Reason}).
+    gen_statem:cast(Pid, {close, Reason}).
 
 
 %%%===================================================================
@@ -211,7 +211,7 @@ handle_event(cast, #'v1_0.open'{max_frame_size = MFSz, idle_time_out = Timeout},
     State2 = lists:foldr(
                fun(From, S0) ->
                        {Ret, S2} = handle_begin_session(From, S0),
-                       _ = gen_fsm:reply(From, Ret),
+                       _ = gen_statem:reply(From, Ret),
                        S2
                end, State1, PendingSessionReqs),
     ok = notify_opened(Config),
@@ -236,14 +236,14 @@ handle_event(cast, #'v1_0.close'{error = Error}, opened, State = #state{config =
     ok = notify_closed(Config, translate_err(Error)),
     _ = send_close(State, none),
     {stop, normal, State};
-handle_event(cast, Frame, opened, _State) ->
+handle_event(cast, Frame, opened, State) ->
     error_logger:warning_msg("Unexpected connection frame ~p when in state ~p ~n",
                              [Frame, State]),
     keep_state_and_data;
 
 handle_event(cast, heartbeat, close_sent, _State) ->
     keep_state_and_data;
-handle_event(#'v1_0.close'{}, close_sent, State) ->
+handle_event(cast, #'v1_0.close'{}, close_sent, State) ->
     %% TODO: we should probably set up a timer before this to ensure
     %% we close down event if no reply is received
     {stop, normal, State};
@@ -272,7 +272,7 @@ handle_event({call, From}, begin_session, StateName,
     {keep_state, State1};
 handle_event({call, From}, begin_session, _StateName, _State) ->
     {keep_state_and_data, [{reply, From, {error, connection_closed}}]};
-handle_event({call, From}, _Event, _From, _StateName, _State) ->
+handle_event({call, From}, _Event, _StateName, _State) ->
     {keep_state_and_data, [{reply, From, ok}]};
 
 handle_event(info, {'DOWN', MRef, _, _, _Info}, StateName, State = #state{reader_m_ref = MRef,
