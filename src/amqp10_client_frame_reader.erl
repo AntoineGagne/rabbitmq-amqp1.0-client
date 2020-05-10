@@ -290,8 +290,8 @@ route_frame(Channel, FrameType, {Performative, Payload} = Frame, State0) ->
                                                State0),
     ?DBG("FRAME -> ~p ~p~n ~p~n", [Channel, DestinationPid, Performative]),
     case Payload of
-        <<>> -> ok = gen_fsm:send_event(DestinationPid, Performative);
-        _ -> ok = gen_fsm:send_event(DestinationPid, Frame)
+        <<>> -> ok = gen_statem:cast(DestinationPid, Performative);
+        _ -> ok = gen_statem:cast(DestinationPid, Frame)
     end,
     State.
 
