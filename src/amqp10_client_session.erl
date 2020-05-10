@@ -221,7 +221,7 @@ handle_event(cast, {socket_ready, Socket}, unmapped, State) ->
 
 handle_event({call, From}, {attach, Attach}, unmapped,
              #state{early_attach_requests = EARs} = State) ->
-    {next_state, unmapped, State#state{early_attach_requests = [{From, Attach} | EARs]}};
+    {keep_state, State#state{early_attach_requests = [{From, Attach} | EARs]}};
 
 handle_event(cast, #'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
                                  next_outgoing_id = {uint, NOI},
@@ -245,7 +245,7 @@ handle_event(cast, #'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
 
 handle_event({call, From}, {attach, Attach}, begin_sent,
              #state{early_attach_requests = EARs} = State) ->
-    {next_state, begin_sent, State#state{early_attach_requests = [{From, Attach} | EARs]}};
+    {keep_state, State#state{early_attach_requests = [{From, Attach} | EARs]}};
 
 handle_event(cast, 'end', mapped, State) ->
     %% We send the first end frame and wait for the reply.

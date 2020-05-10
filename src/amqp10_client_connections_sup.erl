@@ -17,31 +17,38 @@
 
 -behaviour(supervisor).
 
-%% Private API.
+%% Private API
 -export([start_link/0,
          stop_child/1]).
 
 %% Supervisor callbacks.
 -export([init/1]).
 
--define(CHILD(Id, Mod, Type, Args), {Id, {Mod, start_link, Args},
-                                     temporary, infinity, Type, [Mod]}).
-
 %% -------------------------------------------------------------------
 %% Private API.
 %% -------------------------------------------------------------------
 
-stop_child(Pid) ->
-    supervisor:terminate_child({local, ?MODULE}, Pid).
-
+-spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+-spec stop_child(Pid :: pid()) -> ok | {error, term()}.
+stop_child(Pid) ->
+    supervisor:terminate_child({local, ?MODULE}, Pid).
 
 %% -------------------------------------------------------------------
 %% Supervisor callbacks.
 %% -------------------------------------------------------------------
 
 init([]) ->
-    Template = ?CHILD(connection_sup, amqp10_client_connection_sup,
-                      supervisor, []),
-    {ok, {{simple_one_for_one, 0, 1}, [Template]}}.
+    {ok, {#{strategy => simple_one_for_one,
+            intensity => 0,
+            period => 1},
+          [
+           #{id => connection_sup,
+             start => {amqp10_client_connection_sup, start_link, []},
+             restart => temporary,
+             shutdown => infinity,
+             type => supervisor,
+             modules => [amqp10_client_connection_sup]}
+          ]}}.
