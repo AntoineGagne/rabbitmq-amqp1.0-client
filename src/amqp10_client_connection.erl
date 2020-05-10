@@ -118,7 +118,7 @@ close(Pid, Reason) ->
 %%%===================================================================
 
 start_link(Sup, Config) ->
-    gen_statem:start_link(?MODULE, [Sup, Config], []).
+    gen_statem:start_link(?MODULE, {Sup, Config}, []).
 
 set_other_procs(Pid, OtherProcs) ->
     gen_statem:cast(Pid, {set_other_procs, OtherProcs}).
@@ -146,7 +146,7 @@ heartbeat(Pid) ->
 callback_mode() ->
     [handle_event_function].
 
-init([Sup, Config0]) ->
+init({Sup, Config0}) ->
     process_flag(trap_exit, true),
     Config = maps:merge(config_defaults(), Config0),
     {ok, expecting_socket, #state{connection_sup = Sup,
