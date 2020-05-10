@@ -295,9 +295,8 @@ handle_event(cast, #'v1_0.detach'{handle = {uint, InHandle}, closed = Closed, er
                                    Err -> Err
                                end,
                       ok = notify_link_detached(Link, Reason),
-                      {next_state, mapped,
-                       State#state{links = maps:remove(OutHandle, Links),
-                                   link_handle_index = maps:remove(InHandle, LHI)}}
+                      {keep_state, State#state{links = maps:remove(OutHandle, Links),
+                                               link_handle_index = maps:remove(InHandle, LHI)}}
               end);
 
 handle_event(cast, #'v1_0.flow'{handle = undefined} = Flow, mapped, State0) ->
