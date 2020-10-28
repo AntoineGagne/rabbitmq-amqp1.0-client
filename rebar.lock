@@ -1,0 +1,4 @@
+[{<<"amqp10_common">>,
+  {git,"https://github.com/AntoineGagne/rabbitmq-amqp1.0-common.git",
+       {ref,"f309dc573a80493b3019fc95f4d40fa59b66985d"}},
+  0}].
